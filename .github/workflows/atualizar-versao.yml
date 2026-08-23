@@ -1,1 +1,61 @@
+# PROJETO GARCOM - automatiza o version.txt a partir do firmware.bin
+#
+# O QUE FAZ: toda vez que voce sobe um novo firmware.bin pro repositorio
+# (upload direto pelo site do GitHub, ou git push), esta Action roda
+# sozinha, calcula um hash (identificador unico) do conteudo do arquivo, e
+# escreve esse hash no version.txt - automaticamente, sem voce precisar
+# editar nada a mao. So dispara quando o firmware.bin muda de verdade
+# (o filtro "paths" abaixo), entao nao entra em loop com o proprio commit
+# que ela faz.
+#
+# Sintaxe confirmada contra a documentacao oficial do GitHub Actions em
+# 23/08/2026 (docs.github.com/actions) e o README oficial de
+# actions/checkout (versao atual: v7).
+#
+# COMO INSTALAR (uma vez so):
+#   1. No seu repositorio (vinilima-br/garcom-firmware) no site do GitHub:
+#      Add file -> Create new file
+#   2. No campo de nome do arquivo, digite exatamente:
+#        .github/workflows/atualizar-versao.yml
+#      (o GitHub cria as pastas .github/workflows/ sozinho ao digitar as
+#      barras - isso e obrigatorio, tem que ser exatamente esse caminho)
+#   3. Cole o conteudo deste arquivo inteiro
+#   4. Commit direto na branch main
+#
+# Depois disso, na PRIMEIRA vez que voce subir um firmware.bin novo, entre
+# em Actions (aba do repositorio) e confira se rodou com sucesso (bolinha
+# verde). Se der erro de permissao no passo de commit, o mais provavel e
+# ajustar em Settings -> Actions -> General -> Workflow permissions ->
+# "Read and write permissions".
 
+name: Atualizar version.txt a partir do firmware.bin
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'firmware.bin'
+
+permissions:
+  contents: write
+
+jobs:
+  atualizar-versao:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o repositorio
+        uses: actions/checkout@v7
+
+      - name: Calcular hash do firmware.bin e gravar em version.txt
+        run: |
+          HASH=$(sha256sum firmware.bin | cut -c1-12)
+          echo "Hash calculado a partir do firmware.bin: $HASH"
+          echo -n "$HASH" > version.txt
+
+      - name: Commitar version.txt (so se realmente mudou)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.txt
+          git diff --cached --quiet && echo "Nada mudou, nada pra commitar." || git commit -m "Atualiza version.txt automaticamente a partir do firmware.bin"
+          git push
