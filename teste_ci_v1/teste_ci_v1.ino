@@ -10,7 +10,7 @@
 
 void setup() {
   Serial.begin(115200);
-  delay(200);
+  delay(2000);
   Serial.println();
   Serial.println(F("[teste-ci] compilado com sucesso pela Action automatica"));
 }
