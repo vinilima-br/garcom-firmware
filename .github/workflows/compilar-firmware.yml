@@ -97,7 +97,13 @@ jobs:
           # E o jeito mais confiavel de saber "qual e a versao nova" quando
           # existem varias pastas de versoes antigas paradas no repositorio
           # (ex: v6, v7, v8 juntas) - olha o commit, nao a lista de pastas.
-          ARQUIVO_MUDADO=$(git diff --name-only HEAD~1 HEAD -- '*.ino' | head -n 1 || true)
+          # --diff-filter=d EXCLUI arquivos deletados do resultado: um commit
+          # que so apaga uma pasta antiga (sem adicionar/editar nenhum .ino)
+          # nao deve ser tratado como "achei o sketch novo" - ele cai no
+          # fallback abaixo, que acha a pasta valida mais recente que ainda
+          # existe. Sem esse filtro, um commit de delete faria a Action tentar
+          # compilar um caminho que nao existe mais e falhar.
+          ARQUIVO_MUDADO=$(git diff --name-only --diff-filter=d HEAD~1 HEAD -- '*.ino' | head -n 1 || true)
 
           if [ -n "$ARQUIVO_MUDADO" ]; then
             CAMINHO=$(dirname "$ARQUIVO_MUDADO")
