@@ -41,6 +41,18 @@
 #   Pronto. As duas Actions fazem o resto: compilam, geram o firmware.bin,
 #   calculam o version.txt, e o Gateway (com a trava do v7, ver o doc do
 #   projeto) baixa e aplica sozinho no proximo boot.
+#
+# REQUISITO: um secret chamado FIRMWARE_PAT com um Personal Access Token
+# (fine-grained, permissao "Contents: Read and write" so neste repositorio)
+# precisa estar salvo em Settings -> Secrets and variables -> Actions do
+# repositorio. Motivo: um push feito com o GITHUB_TOKEN automatico do
+# proprio GitHub Actions NUNCA dispara outro workflow (protecao anti-loop
+# deliberada do GitHub, documentada em
+# docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)
+# - por isso o commit do firmware.bin feito por esta Action nao acionava a
+# atualizar-versao.yml sozinho. Usando um PAT proprio no lugar do token
+# automatico, o encadeamento das duas Actions passa a funcionar de ponta a
+# ponta sem esse bloqueio.
 
 name: Compilar firmware.bin a partir do .ino
 
@@ -62,6 +74,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 2   # precisa do commit anterior tambem, pra comparar o que mudou (passo seguinte)
+          token: ${{ secrets.FIRMWARE_PAT }}   # PAT proprio, nao o GITHUB_TOKEN automatico - ver explicacao no topo do arquivo
 
       - name: Instalar o arduino-cli
         uses: arduino/setup-arduino-cli@v2
