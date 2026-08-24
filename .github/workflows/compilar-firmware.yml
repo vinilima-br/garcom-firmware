@@ -1,0 +1,143 @@
+# PROJETO GARCOM - compila o .ino automaticamente e gera o firmware.bin
+#
+# O QUE FAZ: toda vez que voce sobe/edita um arquivo .ino em qualquer pasta
+# do repositorio (upload direto pelo site do GitHub, ou git push), esta
+# Action roda sozinha, acha a pasta do sketch automaticamente, instala o
+# core ESP8266 e a lib WiFiManager, COMPILA o codigo (igual o Arduino IDE
+# faria no seu PC), gera o firmware.bin e commita ele de volta no
+# repositorio. A Action "atualizar-versao.yml" (ja instalada) entao detecta
+# essa mudanca no firmware.bin e atualiza o version.txt sozinha - as duas
+# juntas fecham o ciclo inteiro: voce sobe o .ino, o resto acontece
+# sozinho, igual e hoje (so que sem voce precisar compilar nem exportar
+# nada na sua maquina).
+#
+# COMO FUNCIONA A BUSCA DA PASTA: nao existe um caminho fixo no workflow.
+# A Action olha qual .ino mudou no PROPRIO commit que ela esta processando
+# (git diff do commit) - por isso funciona certinho mesmo com varias pastas
+# de versoes antigas (v6, v7, v8...) espalhadas pelo repositorio, sem
+# confundir uma com a outra. Regra do Arduino: a pasta precisa ter o mesmo
+# nome do .ino dentro dela (ex: etapa3_gateway_final_v8/etapa3_gateway_final_v8.ino).
+# Se subir uma pasta nova assim, a Action encontra sozinha - voce NUNCA
+# precisa editar este arquivo pra apontar o caminho.
+#
+# Sintaxe confirmada contra a documentacao oficial do arduino-cli
+# (docs.arduino.cc/arduino-cli) e o README oficial da action
+# arduino/setup-arduino-cli (versao atual: v2) em 24/08/2026.
+#
+# COMO INSTALAR (uma vez so, igual voce ja fez com a atualizar-versao.yml):
+#   1. No repositorio (vinilima-br/garcom-firmware) no site do GitHub:
+#      Add file -> Create new file
+#   2. No campo de nome do arquivo, digite exatamente:
+#        .github/workflows/compilar-firmware.yml
+#   3. Cole o conteudo deste arquivo inteiro
+#   4. Commit direto na branch main
+#
+# A PARTIR DAI, o unico passo manual pra publicar uma versao nova e:
+#   1. Criar uma pasta nova (ex: meu_sketch_v8/) com o .ino dentro
+#      (Add file -> Upload files, arrastando so o .ino - o GitHub cria a
+#      pasta sozinho se voce digitar "meu_sketch_v8/meu_sketch_v8.ino" no
+#      nome, ou voce cria a pasta antes e sobe o arquivo dentro dela)
+#   2. Commitar
+#   Pronto. As duas Actions fazem o resto: compilam, geram o firmware.bin,
+#   calculam o version.txt, e o Gateway (com a trava do v7, ver o doc do
+#   projeto) baixa e aplica sozinho no proximo boot.
+
+name: Compilar firmware.bin a partir do .ino
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**.ino'
+  workflow_dispatch:   # tambem permite rodar manualmente pela aba Actions, se precisar
+
+permissions:
+  contents: write
+
+jobs:
+  compilar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o repositorio
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2   # precisa do commit anterior tambem, pra comparar o que mudou (passo seguinte)
+
+      - name: Instalar o arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Configurar indice do core ESP8266
+        run: |
+          arduino-cli config init --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          arduino-cli core update-index
+
+      - name: Instalar o core ESP8266 (mesma versao usada no projeto)
+        run: arduino-cli core install esp8266:esp8266@3.1.2
+
+      - name: Instalar a biblioteca WiFiManager
+        run: arduino-cli lib install "WiFiManager@2.0.17"
+
+      - name: Achar a pasta do sketch automaticamente
+        id: achar_sketch
+        run: |
+          # Prioridade 1: qual .ino mudou no commit que disparou este workflow.
+          # E o jeito mais confiavel de saber "qual e a versao nova" quando
+          # existem varias pastas de versoes antigas paradas no repositorio
+          # (ex: v6, v7, v8 juntas) - olha o commit, nao a lista de pastas.
+          ARQUIVO_MUDADO=$(git diff --name-only HEAD~1 HEAD -- '*.ino' | head -n 1 || true)
+
+          if [ -n "$ARQUIVO_MUDADO" ]; then
+            CAMINHO=$(dirname "$ARQUIVO_MUDADO")
+            echo "Sketch encontrado pelo commit (.ino que mudou): $CAMINHO"
+          else
+            # Fallback (ex: rodou manualmente pela aba Actions, sem commit
+            # novo de .ino pra comparar): pega a pasta valida modificada
+            # mais recentemente no checkout.
+            echo "Nenhum .ino novo neste commit - usando fallback (pasta mais recente)."
+            CAMINHO=$(find . -path ./.github -prune -o -name "*.ino" -printf '%T@ %p\n' -type f 2>/dev/null \
+              | sort -rn \
+              | while read -r ts arquivo; do
+                  pasta=$(dirname "$arquivo")
+                  nome_pasta=$(basename "$pasta")
+                  nome_arquivo=$(basename "$arquivo" .ino)
+                  if [ "$nome_pasta" = "$nome_arquivo" ]; then
+                    echo "$pasta"
+                  fi
+                done | head -n 1)
+          fi
+
+          if [ -z "$CAMINHO" ]; then
+            echo "ERRO: nenhuma pasta encontrada no formato NomeDoSketch/NomeDoSketch.ino"
+            exit 1
+          fi
+
+          echo "Pasta do sketch que sera compilada: $CAMINHO"
+          echo "caminho=$CAMINHO" >> "$GITHUB_OUTPUT"
+
+      - name: Compilar o sketch (gera o .bin dentro da propria pasta)
+        run: |
+          arduino-cli compile \
+            --fqbn esp8266:esp8266:d1_mini \
+            --export-binaries \
+            "${{ steps.achar_sketch.outputs.caminho }}"
+
+      - name: Copiar o .bin gerado para firmware.bin na raiz
+        run: |
+          CAMINHO="${{ steps.achar_sketch.outputs.caminho }}"
+          BIN_GERADO=$(find "$CAMINHO/build" -name "*.ino.bin" | head -n 1)
+
+          if [ -z "$BIN_GERADO" ]; then
+            echo "ERRO: compilacao nao gerou nenhum .bin"
+            exit 1
+          fi
+
+          echo "Binario gerado: $BIN_GERADO"
+          cp "$BIN_GERADO" firmware.bin
+
+      - name: Commitar firmware.bin (so se realmente mudou)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add firmware.bin
+          git diff --cached --quiet && echo "Nada mudou, nada pra commitar." || git commit -m "Compila firmware.bin automaticamente a partir do .ino"
+          git push
