@@ -41,7 +41,7 @@ extern "C" {
 
 /* ------------------------------- AJUSTES ---------------------------------- */
 
-#define PORTAL_NOME          "Garcom-Config"
+#define PORTAL_NOME          "Garcom-Gatway"
 #define PORTAL_SENHA         "12345678"
 #define PORTAL_TIMEOUT_S     180
 #define CONEXAO_TIMEOUT_S    20
