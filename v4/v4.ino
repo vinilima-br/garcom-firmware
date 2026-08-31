@@ -21,6 +21,13 @@
    anterior, pra ficar obvio que falhou); ao conectar, 3 piscadas curtas de
    confirmacao e apaga. Ver secao "LED: feedback visual da conexao Wi-Fi".
 
+   v12 = v11 + comando remoto de reinicio via /att no servidor: a cada
+   ~7s (nao bloqueante) o Gateway pergunta em GET /gateway/comando se tem
+   algum reinicio pendente (o garcom aciona isso acessando .../att no
+   celular/PC e digitando uma senha). Resposta e texto puro "1"/"0" - sem
+   JSON - e e entregue uma UNICA vez pelo servidor, entao nao ha risco de
+   loop de reinicio. Ver secao "COMANDO REMOTO: REINICIO VIA /att".
+
    Historico completo (v3 a v8, decisoes, bugs encontrados e corrigidos,
    testes em hardware) documentado no projeto Claude "ESP PROGRAMACAO".
 
@@ -75,11 +82,14 @@ extern "C" {
 /* --- LED de status da conexao Wi-Fi (ver secao mais abaixo) --- */
 #define PISCA_TENTANDO_MS    150      // pisca rapido e constante = tentando conectar
 
+/* --- Comando remoto de reinicio, via /att no servidor (ver secao mais abaixo) --- */
+#define INTERVALO_COMANDO_MS  7000UL  // frequencia da checagem (nao bloqueante)
+
 /* --- OTA via GitHub --- */
 
 // So um rotulo pra humano ler no Serial - nao tem efeito na logica de OTA
 // (a comparacao de versao usa o hash do version.txt, nao isto aqui).
-#define FIRMWARE_VERSION       "v11-led-wifi-status"
+#define FIRMWARE_VERSION       "v12-comando-remoto"
 
 #define OTA_GITHUB_USER        "vinilima-br"
 #define OTA_GITHUB_REPO        "garcom-firmware"
@@ -580,6 +590,57 @@ void descobrirServidor() {
   Serial.println(url_servidor);
 }
 
+/* ------------------- COMANDO REMOTO: REINICIO VIA /att -------------------- */
+/* O servidor nunca empurra nada por conta propria pro Gateway - so responde
+   quando perguntado. Aqui a gente pergunta periodicamente (nao bloqueante,
+   com millis(), do mesmo jeito que o botao de reset e o relatorio de status
+   em loop()) se tem algum reinicio pendente - acionado pelo garcom
+   acessando .../att e digitando a senha.
+
+   Resposta e texto puro "1"/"0" (sem JSON), do mesmo jeito que o
+   version.txt do OTA - nenhuma lib de parsing nova precisa entrar so por
+   causa disso. O servidor entrega o "1" uma UNICA vez (zera a flag dele
+   mesmo no instante que responde), entao mesmo que a checagem seguinte
+   aconteca logo depois de um boot, ela vai ver "0" - sem risco de loop de
+   reinicio. */
+
+void verificarComandoRemoto() {
+  static unsigned long ultima_checagem = 0;
+  if (millis() - ultima_checagem < INTERVALO_COMANDO_MS) return;
+  ultima_checagem = millis();
+
+  if (WiFi.status() != WL_CONNECTED || url_servidor.length() == 0) return;
+
+  // mesma base (host/protocolo) que descobrirServidor() ja escolheu pra
+  // enviar os chamados - so troca o final "/chamar" por "/gateway/comando"
+  String urlComando = url_servidor;
+  urlComando.replace("/chamar", "/gateway/comando");
+
+  bool usaHttps = urlComando.startsWith("https://");
+  WiFiClient clienteHttp;
+  BearSSL::WiFiClientSecure clienteHttps;
+  if (usaHttps) clienteHttps.setInsecure();  // mesma decisao do OTA e do enviarPost()
+
+  HTTPClient http;
+  bool comecou = usaHttps ? http.begin(clienteHttps, urlComando)
+                          : http.begin(clienteHttp, urlComando);
+  if (!comecou) return;
+
+  http.setTimeout(usaHttps ? 6000 : 3000);
+  int codigo = http.GET();
+  if (codigo == 200) {
+    String corpo = http.getString();
+    corpo.trim();
+    if (corpo == "1") {
+      Serial.println(F("[comando] reinicio solicitado remotamente (via /att) - reiniciando..."));
+      http.end();
+      delay(200);
+      ESP.restart();
+    }
+  }
+  http.end();
+}
+
 /* --------------------------------- SETUP ---------------------------------- */
 
 void setup() {
@@ -737,6 +798,7 @@ void verificarBotaoReset() {
 void loop() {
   MDNS.update();
   verificarBotaoReset();
+  verificarComandoRemoto();
 
   if (fila_saida != fila_entrada) {
     ItemFila item;
