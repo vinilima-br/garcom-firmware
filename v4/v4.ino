@@ -15,6 +15,12 @@
    sozinho no proximo boot, protegido pela trava (maximo 3 tentativas por
    versao antes de desistir - nunca fica preso em loop).
 
+   v11 = v10 + feedback visual de LED durante a conexao Wi-Fi: pisca rapido
+   e constante enquanto tenta a rede salva; se nao conectar e o portal
+   "Garcom-Config" abrir, muda pra um pisca duplo + pausa (bem diferente do
+   anterior, pra ficar obvio que falhou); ao conectar, 3 piscadas curtas de
+   confirmacao e apaga. Ver secao "LED: feedback visual da conexao Wi-Fi".
+
    Historico completo (v3 a v8, decisoes, bugs encontrados e corrigidos,
    testes em hardware) documentado no projeto Claude "ESP PROGRAMACAO".
 
@@ -34,6 +40,7 @@
 #include <espnow.h>
 #include <ESP8266httpUpdate.h>
 #include <EEPROM.h>
+#include <Ticker.h>   // parte do core ESP8266 - nenhuma lib nova pra instalar
 
 extern "C" {
   #include <user_interface.h>
@@ -48,8 +55,11 @@ extern "C" {
 #define PORTAL_TIMEOUT_S     180
 #define CONEXAO_TIMEOUT_S    20
 
-#define SERVIDOR_IP_RESERVA     "192.168.3.109"
-#define SERVIDOR_PORTA_RESERVA  5000
+// URL fixa do Cloudflare Tunnel — usada quando o Gateway está numa rede
+// diferente da rede do mini PC (ex.: Gateway instalado num estabelecimento
+// remoto) e por isso o mDNS (que só enxerga a rede local) não encontra o
+// servidor. HTTPS obrigatório aqui — o Cloudflare Tunnel não aceita HTTP puro.
+#define SERVIDOR_CLOUDFLARE_URL "https://garcom.meuchapa.stream/chamar"
 
 #define TENTATIVAS_MDNS      6
 #define SERVICO_MDNS         "garcom"
@@ -62,11 +72,14 @@ extern "C" {
 #define PISCA_LENTO_MS       400      // velocidade do pisca no INICIO do aperto
 #define PISCA_RAPIDO_MS      40       // velocidade do pisca perto dos 10s
 
+/* --- LED de status da conexao Wi-Fi (ver secao mais abaixo) --- */
+#define PISCA_TENTANDO_MS    150      // pisca rapido e constante = tentando conectar
+
 /* --- OTA via GitHub --- */
 
 // So um rotulo pra humano ler no Serial - nao tem efeito na logica de OTA
 // (a comparacao de versao usa o hash do version.txt, nao isto aqui).
-#define FIRMWARE_VERSION       "v9-gateway-id"
+#define FIRMWARE_VERSION       "v11-led-wifi-status"
 
 #define OTA_GITHUB_USER        "vinilima-br"
 #define OTA_GITHUB_REPO        "garcom-firmware"
@@ -280,6 +293,59 @@ void macParaTexto(const uint8_t *mac, char *saida) {
 void ledOn()  { digitalWrite(LED_BUILTIN, LOW);  }  // ESP8266: LOW = aceso
 void ledOff() { digitalWrite(LED_BUILTIN, HIGH); }  // ESP8266: HIGH = apagado
 
+/* -------------------- LED: feedback visual da conexao Wi-Fi --------------- */
+/* wm.autoConnect() e a espera do portal de configuracao sao chamadas
+   BLOQUEANTES - o loop() normal (onde o botao de reset pisca o LED com
+   millis()) nao roda enquanto elas duram. Por isso aqui usamos Ticker
+   (incluido no core ESP8266, nenhuma lib nova): ele dispara por interrupcao
+   de hardware e continua piscando o LED mesmo com o sketch inteiro "preso"
+   dentro do WiFiManager.
+
+   Tres padroes, de proposito bem diferentes entre si:
+   - TENTANDO : pisca rapido e constante (150ms) - tentando a rede salva.
+   - FALHOU   : pisca duplo + pausa longa - a rede salva NAO conectou e o
+                portal "Garcom-Config" abriu, esperando voce configurar.
+   - CONECTOU : 3 piscadas curtas de confirmacao, depois apaga. */
+
+Ticker piscaWifiTicker;
+bool   piscaWifiEstado = false;
+
+void piscaWifiToggle() {
+  piscaWifiEstado = !piscaWifiEstado;
+  digitalWrite(LED_BUILTIN, piscaWifiEstado ? LOW : HIGH);
+}
+
+void iniciarLedTentandoConectar() {
+  piscaWifiTicker.attach_ms(PISCA_TENTANDO_MS, piscaWifiToggle);
+}
+
+// duracoes (ms) do padrao "falhou": aceso, apagado, aceso, apagado(pausa) -
+// avancaPadraoFalha reagenda a si mesma via once_ms, entao da pra ter uma
+// pausa bem mais longa que os piscas sem precisar de um segundo Ticker
+const uint16_t PADRAO_FALHA_MS[] = { 100, 120, 100, 700 };
+uint8_t        passoPadraoFalha  = 0;
+
+void avancaPadraoFalha() {
+  digitalWrite(LED_BUILTIN, (passoPadraoFalha % 2 == 0) ? LOW : HIGH);
+  piscaWifiTicker.once_ms(PADRAO_FALHA_MS[passoPadraoFalha], avancaPadraoFalha);
+  passoPadraoFalha = (passoPadraoFalha + 1) % 4;
+}
+
+void iniciarLedFalhaConexao() {
+  piscaWifiTicker.detach();   // sai do padrao "tentando"
+  passoPadraoFalha = 0;
+  avancaPadraoFalha();
+}
+
+// bloqueante de proposito (curto, 480ms no total) - a conexao ja terminou
+// aqui, nada mais depende de tempo real nesse instante
+void avisarWifiConectado() {
+  for (uint8_t i = 0; i < 3; i++) {
+    ledOn();  delay(80);
+    ledOff(); delay(80);
+  }
+}
+
 /* --------------------------- OTA VIA GITHUB ------------------------------- */
 /* Mesma logica ja confirmada em hardware no etapa3_3_ota_teste.ino. Nunca
    trava e nunca impede o resto do setup() de continuar: qualquer falha so
@@ -471,10 +537,15 @@ void aoAbrirPortal(WiFiManager *wm) {
   Serial.print(F("[portal] conecte no Wi-Fi \""));
   Serial.print(PORTAL_NOME);
   Serial.println(F("\" para configurar"));
-  ledOn();   // fica aceso fixo enquanto o portal estiver esperando voce
+  iniciarLedFalhaConexao();   // pisca duplo + pausa: nao conectou, aguardando config
 }
 
 /* ------------------------- DESCOBRIR O SERVIDOR --------------------------- */
+/* Estratégia (v9): mDNS primeiro (funciona quando o Gateway está na MESMA
+   rede local do mini PC — ex.: "Casa"), com fallback pra URL fixa do
+   Cloudflare Tunnel via HTTPS (funciona de qualquer rede — ex.: Gateway
+   instalado num estabelecimento remoto, onde o mDNS nunca vai achar nada
+   porque mDNS não atravessa redes diferentes). */
 
 void descobrirServidor() {
   Serial.print(F("[mdns] procurando '_"));
@@ -491,7 +562,7 @@ void descobrirServidor() {
       url_servidor = "http://" + ip.toString() + ":" + String(porta) + "/chamar";
       achou_por_mdns = true;
       Serial.println(F(" achado!"));
-      Serial.print(F("[mdns] servidor: "));
+      Serial.print(F("[mdns] servidor (rede local): "));
       Serial.println(url_servidor);
       return;
     }
@@ -499,11 +570,13 @@ void descobrirServidor() {
     delay(500);
   }
 
+  // mDNS não achou nada — provavelmente o Gateway está numa rede diferente
+  // da rede de casa (ex.: instalado num estabelecimento remoto). Usa a URL
+  // fixa do Cloudflare Tunnel, que funciona de qualquer lugar via HTTPS.
   Serial.println(F(" nao achei"));
-  url_servidor = String("http://") + SERVIDOR_IP_RESERVA + ":" +
-                 SERVIDOR_PORTA_RESERVA + "/chamar";
+  url_servidor = SERVIDOR_CLOUDFLARE_URL;
   achou_por_mdns = false;
-  Serial.print(F("[mdns] servidor (reserva): "));
+  Serial.print(F("[mdns] nao encontrado na rede local -> usando Cloudflare: "));
   Serial.println(url_servidor);
 }
 
@@ -539,14 +612,19 @@ void setup() {
   wm.setCustomHeadElement(PORTAL_CSS);   // sem PROGMEM - ver armadilha 17
 
   Serial.println(F("[wifi] tentando rede salva (WiFiManager)..."));
+  iniciarLedTentandoConectar();   // pisca rapido e constante: tentando conectar
 
   if (!wm.autoConnect(PORTAL_NOME, PORTAL_SENHA)) {
+    piscaWifiTicker.detach();
+    ledOff();
     Serial.println(F("[wifi] portal expirou sem configuracao. Reiniciando..."));
     delay(3000);
     ESP.restart();
   }
 
-  ledOff();  // portal fechou (se tiver aberto) - volta ao normal
+  piscaWifiTicker.detach();
+  avisarWifiConectado();   // 3 piscadas rapidas: conectou com sucesso
+  ledOff();                // portal fechou (se tiver aberto) - volta ao normal
 
   Serial.print(F("[wifi] conectado: "));
   Serial.println(WiFi.SSID());
@@ -714,6 +792,11 @@ void loop() {
 }
 
 /* ------------------------------ POST HTTP --------------------------------- */
+/* Suporta tanto HTTP puro (servidor achado via mDNS na rede local, URL tipo
+   "http://192.168.x.x:5000/chamar") quanto HTTPS (fallback pro Cloudflare
+   Tunnel, URL tipo "https://garcom.meuchapa.stream/chamar"). O tipo de
+   WiFiClient usado precisa bater com o esquema da URL — daí a checagem
+   de "https://" logo no início pra escolher qual dos dois usar. */
 
 void enviarPost(const char *mac) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -722,19 +805,29 @@ void enviarPost(const char *mac) {
     return;
   }
 
-  WiFiClient client;
+  bool usaHttps = url_servidor.startsWith("https://");
+
+  WiFiClient clienteHttp;
+  BearSSL::WiFiClientSecure clienteHttps;
+  if (usaHttps) {
+    clienteHttps.setInsecure();  // sem validar certificado - mesma decisao do OTA
+  }
+
   HTTPClient http;
   String corpo = String("{\"mac\":\"") + mac + "\",\"gateway\":\"" + GATEWAY_ID + "\"}";
 
   Serial.print(F("[post]   -> "));
 
-  if (!http.begin(client, url_servidor)) {
+  bool comecou = usaHttps ? http.begin(clienteHttps, url_servidor)
+                          : http.begin(clienteHttp, url_servidor);
+
+  if (!comecou) {
     Serial.println(F("URL invalida"));
     falhas++;
     return;
   }
 
-  http.setTimeout(5000);
+  http.setTimeout(usaHttps ? 8000 : 5000);  // HTTPS via internet precisa de mais margem
   http.addHeader("Content-Type", "application/json");
   int codigo = http.POST(corpo);
 
