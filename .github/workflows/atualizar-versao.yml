@@ -1,32 +1,17 @@
 # PROJETO GARCOM - automatiza o version.txt a partir do firmware.bin
 #
-# O QUE FAZ: toda vez que voce sobe um novo firmware.bin pro repositorio
-# (upload direto pelo site do GitHub, ou git push), esta Action roda
-# sozinha, calcula um hash (identificador unico) do conteudo do arquivo, e
-# escreve esse hash no version.txt - automaticamente, sem voce precisar
-# editar nada a mao. So dispara quando o firmware.bin muda de verdade
-# (o filtro "paths" abaixo), entao nao entra em loop com o proprio commit
-# que ela faz.
+# O QUE FAZ: toda vez que um firmware.bin muda - na RAIZ (legado) ou dentro
+# da pasta de um Gateway (ex: esp32_A4-CF-12-F0-93-90/firmware.bin) - esta
+# Action calcula o hash do arquivo e grava no version.txt DA MESMA PASTA.
 #
-# Sintaxe confirmada contra a documentacao oficial do GitHub Actions em
-# 23/08/2026 (docs.github.com/actions) e o README oficial de
-# actions/checkout (versao atual: v7).
+# Atualizacao 27/09/2026 (OTA por dispositivo): a compilar-firmware.yml ja
+# grava o version.txt junto com o firmware.bin, entao quando ela e quem
+# gerou o .bin, esta Action so confere e sai sem commitar ("Nada mudou").
+# Ela continua util quando voce sobe um firmware.bin MANUALMENTE (exportado
+# pelo Arduino IDE) direto numa pasta - o version.txt e calculado aqui.
 #
-# COMO INSTALAR (uma vez so):
-#   1. No seu repositorio (vinilima-br/garcom-firmware) no site do GitHub:
-#      Add file -> Create new file
-#   2. No campo de nome do arquivo, digite exatamente:
-#        .github/workflows/atualizar-versao.yml
-#      (o GitHub cria as pastas .github/workflows/ sozinho ao digitar as
-#      barras - isso e obrigatorio, tem que ser exatamente esse caminho)
-#   3. Cole o conteudo deste arquivo inteiro
-#   4. Commit direto na branch main
-#
-# Depois disso, na PRIMEIRA vez que voce subir um firmware.bin novo, entre
-# em Actions (aba do repositorio) e confira se rodou com sucesso (bolinha
-# verde). Se der erro de permissao no passo de commit, o mais provavel e
-# ajustar em Settings -> Actions -> General -> Workflow permissions ->
-# "Read and write permissions".
+# O filtro "paths" so dispara quando algum firmware.bin muda de verdade, e
+# o commit que esta Action faz so mexe em version.txt - sem loop.
 
 name: Atualizar version.txt a partir do firmware.bin
 
@@ -35,9 +20,14 @@ on:
     branches: [ main ]
     paths:
       - 'firmware.bin'
+      - '**/firmware.bin'
 
 permissions:
   contents: write
+
+concurrency:
+  group: atualizar-versao
+  cancel-in-progress: false
 
 jobs:
   atualizar-versao:
@@ -45,17 +35,52 @@ jobs:
     steps:
       - name: Baixar o repositorio
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
-      - name: Calcular hash do firmware.bin e gravar em version.txt
+      - name: Calcular hash de cada firmware.bin alterado e gravar o version.txt ao lado
+        env:
+          ANTES: ${{ github.event.before }}
         run: |
-          HASH=$(sha256sum firmware.bin | cut -c1-12)
-          echo "Hash calculado a partir do firmware.bin: $HASH"
-          echo -n "$HASH" > version.txt
+          set -euo pipefail
+          if [ -n "${ANTES:-}" ] && [ "$ANTES" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$ANTES^{commit}" 2>/dev/null; then
+            BASE="$ANTES"
+          else
+            BASE="HEAD~1"
+          fi
+          # ':(glob)**/firmware.bin' pega a raiz E qualquer subpasta
+          BINS=$(git diff --name-only --diff-filter=d "$BASE" HEAD -- ':(glob)**/firmware.bin' || true)
+          : > "$RUNNER_TEMP/versoes.txt"
+          while IFS= read -r BIN; do
+            [ -z "$BIN" ] && continue
+            PASTA=$(dirname "$BIN")
+            HASH=$(sha256sum "$BIN" | cut -c1-12)
+            echo "$BIN -> $PASTA/version.txt = $HASH"
+            echo -n "$HASH" > "$PASTA/version.txt"
+            echo "$PASTA/version.txt" >> "$RUNNER_TEMP/versoes.txt"
+          done <<< "$BINS"
 
       - name: Commitar version.txt (so se realmente mudou)
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add version.txt
-          git diff --cached --quiet && echo "Nada mudou, nada pra commitar." || git commit -m "Atualiza version.txt automaticamente a partir do firmware.bin"
-          git push
+          if [ ! -s "$RUNNER_TEMP/versoes.txt" ]; then
+            echo "Nenhum firmware.bin alterado."
+            exit 0
+          fi
+          xargs -a "$RUNNER_TEMP/versoes.txt" git add --
+          if git diff --cached --quiet; then
+            echo "Nada mudou, nada pra commitar."
+            exit 0
+          fi
+          git commit -m "Atualiza version.txt automaticamente a partir do firmware.bin"
+          for TENTATIVA in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push falhou (tentativa $TENTATIVA) - tentando de novo em 5s..."
+            sleep 5
+          done
+          echo "::error::Nao consegui fazer push depois de 3 tentativas."
+          exit 1
