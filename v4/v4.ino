@@ -1,57 +1,79 @@
 /* ============================================================================
-   PROJETO GARCOM  -  GATEWAY (ESP8266 Lolin/Wemos D1 mini)
+   PROJETO GARCOM  -  GATEWAY (ESP32 generica de 38 pinos / "ESP32 Dev Module")
 
-   Wi-Fi via WiFiManager (portal com tema neon) + OTA a partir do GitHub,
-   com trava de seguranca contra loop infinito de atualizacao (EEPROM) +
-   ESP-NOW (recebe chamados das mesas) + mDNS (acha o servidor Flask) +
-   POST do chamado pro painel + botao D5 pra reconfigurar o Wi-Fi.
+   PORTE do firmware ESP8266 pra ESP32, feito nesta sessao. Base: o .ino que
+   o usuario confirmou ser a v11 (GATEWAY_ID + fallback Cloudflare + LED por
+   Ticker), com o recurso da v12 (reinicio remoto via poll) RECONSTRUIDO por
+   cima a partir da especificacao documentada no projeto Claude "ESP PROGRAMACAO"
+   (doc "projeto-garcom-v11-v12-led-comando-remoto-2026-08") - o .ino literal
+   da v12 nao estava disponivel nesta sessao, so a descricao do que ela faz.
+   Objetivo do usuario: este ESP32 SUBSTITUI o Gateway ESP8266 atual (mesmo
+   papel, mesmo GATEWAY_ID, mesmo contrato com o servidor).
 
-   v8 = v7 byte a byte (so o rotulo/banner mudou): este binario e compilado
-   automaticamente por GitHub Actions a partir deste .ino - nao precisa
-   mais compilar nem exportar nada manualmente, so subir o .ino.
-   Publicar uma atualizacao nova: criar uma pasta com o proximo numero de
-   versao, subir o .ino, e as Actions cuidam do resto (compilar, gerar o
-   firmware.bin, calcular o version.txt). O Gateway detecta e aplica
-   sozinho no proximo boot, protegido pela trava (maximo 3 tentativas por
-   versao antes de desistir - nunca fica preso em loop).
+   Wi-Fi via WiFiManager (portal com tema neon) + OTA a partir do GitHub, com
+   trava de seguranca contra loop infinito de atualizacao (agora em NVS via
+   Preferences, nao mais EEPROM) + ESP-NOW (recebe chamados das mesas) + mDNS
+   (acha o servidor Flask, com fallback pro Cloudflare Tunnel) + POST do
+   chamado pro painel + poll de reinicio remoto (pagina /att do servidor) +
+   botao pra reconfigurar o Wi-Fi.
 
-   v11 = v10 + feedback visual de LED durante a conexao Wi-Fi: pisca rapido
-   e constante enquanto tenta a rede salva; se nao conectar e o portal
-   "Garcom-Config" abrir, muda pra um pisca duplo + pausa (bem diferente do
-   anterior, pra ficar obvio que falhou); ao conectar, 3 piscadas curtas de
-   confirmacao e apaga. Ver secao "LED: feedback visual da conexao Wi-Fi".
+   ------------------------- O QUE MUDOU DO ESP8266 --------------------------
+   - Includes: ESP8266WiFi/WebServer/HTTPClient/mDNS -> WiFi/WebServer/
+     HTTPClient/ESPmDNS; espnow.h -> esp_now.h; ESP8266httpUpdate.h ->
+     HTTPUpdate.h; EEPROM.h -> Preferences.h.
+   - Config da trava de OTA: struct+EEPROM+numero magico -> Preferences (NVS),
+     por chave, sem tamanho fixo de string.
+   - ESP-NOW: sem "self role" (conceito so existe no ESP8266); precisa de
+     WiFi.mode(WIFI_STA) explicito antes de esp_now_init(); a assinatura do
+     callback de recepcao MUDOU entre versoes do core ESP32 (ver comentario
+     junto de aoReceber()) - este arquivo trata os dois casos.
+   - HTTPS: BearSSL::WiFiClientSecure (ESP8266) -> WiFiClientSecure (ESP32,
+     TLS proprio); mesmo metodo setInsecure(), mesmo uso.
+   - OTA: ESPhttpUpdate (objeto global, ESP8266) -> httpUpdate (objeto global,
+     ESP32) - mesma API (rebootOnUpdate, setLedPin, update(), getLastError...).
+   - mDNS: nao precisa de MDNS.update() no loop() (no ESP32 roda em tarefa
+     propria do SDK).
+   - LED: no ESP8266 LOW = aceso; nas placas ESP32 de 38 pinos o LED do
+     GPIO2 e' aceso em HIGH (nao invertido) - ver ledOn()/ledOff() abaixo.
+   - Canal Wi-Fi (so log/depuracao): wifi_get_channel() [ESP8266 SDK] ->
+     WiFi.channel() [API padrao do core ESP32].
+   - Energia: NAO aplicamos setCpuFrequencyMhz(80)/WiFi.setSleep(PS_MIN_MODEM)
+     aqui - isso e' otimizacao pra bateria (usada na mesa). O Gateway fica
+     sempre na tomada, entao mantemos CPU no clock padrao; so garantimos que
+     o radio nao entre em modem-sleep (WiFi.setSleep(false)) pra nao atrasar
+     a chegada dos pacotes ESP-NOW.
+   - Pinos: botao de reset trocou de D5 (GPIO14, so existe nomeado assim no
+     Wemos D1 mini) pra um GPIO generico (ver PINO_BOTAO_RESET abaixo) - uma
+     placa de 38 pinos generica nao tem os aliases D0..D8.
 
-   v12 = v11 + comando remoto de reinicio via /att no servidor: a cada
-   ~7s (nao bloqueante) o Gateway pergunta em GET /gateway/comando se tem
-   algum reinicio pendente (o garcom aciona isso acessando .../att no
-   celular/PC e digitando uma senha). Resposta e texto puro "1"/"0" - sem
-   JSON - e e entregue uma UNICA vez pelo servidor, entao nao ha risco de
-   loop de reinicio. Ver secao "COMANDO REMOTO: REINICIO VIA /att".
+   NOVO nesta versao (reconstrucao da v12): verificarComandoRemoto() - poll
+   nao bloqueante a cada 7s em GET <url_servidor com /chamar trocado por
+   /gateway/comando>; se a resposta em texto puro for exatamente "1", chama
+   ESP.restart(). Serve a pagina /att do servidor (senha la, nao no Gateway).
 
-   Historico completo (v3 a v8, decisoes, bugs encontrados e corrigidos,
-   testes em hardware) documentado no projeto Claude "ESP PROGRAMACAO".
-
-   Placa           : LOLIN(WEMOS) D1 R2 & mini
-   Core ESP8266    : 3.1.2 (API de OTA/EEPROM verificada contra esta versao)
-   Upload Speed    : 115200
+   Placa           : ESP32 Dev Module (generica, 38 pinos)
+   Upload Speed    : 921600 (cair pra 115200 se der erro de sincronismo)
+   Partition Scheme: Default 4MB with spiffs
    Monitor Serial  : 115200
+   Core ESP32      : testado contra o padrao instalado pelo Boards Manager
+                     em set/2026 (linhagem 3.x / IDF 5.x). O callback do
+                     ESP-NOW abaixo tambem cobre cores mais antigos (2.x).
    ========================================================================== */
 
-#include <ESP8266WiFi.h>
+#include <WiFi.h>
 #include <DNSServer.h>
-#include <ESP8266WebServer.h>
+#include <WebServer.h>
 #include <WiFiManager.h>
-#include <ESP8266HTTPClient.h>
+#include <HTTPClient.h>
 #include <WiFiClient.h>
-#include <ESP8266mDNS.h>
-#include <espnow.h>
-#include <ESP8266httpUpdate.h>
-#include <EEPROM.h>
-#include <Ticker.h>   // parte do core ESP8266 - nenhuma lib nova pra instalar
-
-extern "C" {
-  #include <user_interface.h>
-}
+#include <WiFiClientSecure.h>
+#include <ESPmDNS.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+#include <HTTPUpdate.h>
+#include <Preferences.h>
+#include <Ticker.h>   // parte do core ESP32 - nenhuma lib nova pra instalar
+#include <esp_system.h>   // esp_reset_reason() / esp_reset_reason_t (diagnostico do boot)
 
 /* ------------------------------- AJUSTES ---------------------------------- */
 
@@ -62,19 +84,24 @@ extern "C" {
 #define PORTAL_TIMEOUT_S     180
 #define CONEXAO_TIMEOUT_S    20
 
-// URL fixa do Cloudflare Tunnel — usada quando o Gateway está numa rede
+// URL fixa do Cloudflare Tunnel - usada quando o Gateway esta numa rede
 // diferente da rede do mini PC (ex.: Gateway instalado num estabelecimento
-// remoto) e por isso o mDNS (que só enxerga a rede local) não encontra o
-// servidor. HTTPS obrigatório aqui — o Cloudflare Tunnel não aceita HTTP puro.
+// remoto) e por isso o mDNS (que so' enxerga a rede local) nao encontra o
+// servidor. HTTPS obrigatorio aqui - o Cloudflare Tunnel nao aceita HTTP puro.
 #define SERVIDOR_CLOUDFLARE_URL "https://garcom.meuchapa.stream/chamar"
 
 #define TENTATIVAS_MDNS      6
 #define SERVICO_MDNS         "garcom"
 #define PROTOCOLO_MDNS       "tcp"
 
-/* --- Botao de reconfiguracao (validado em hardware) --- */
+/* --- LED de status (onboard da maioria das devkits ESP32 de 38 pinos) --- */
+// Se a sua placa especifica nao tiver LED nesse pino, troque aqui ou ligue
+// um LED externo (com resistor) nesse GPIO.
+#define PINO_LED             2
 
-#define PINO_BOTAO_RESET     D5       // GPIO14 no Lolin/Wemos D1 mini
+/* --- Botao de reconfiguracao --- */
+// GPIO21 <-> GND (pull-up interno, ligacao confirmada pelo usuario nesta placa).
+#define PINO_BOTAO_RESET     21
 #define TEMPO_RESET_MS       10000UL  // segurar 10s para confirmar
 #define PISCA_LENTO_MS       400      // velocidade do pisca no INICIO do aperto
 #define PISCA_RAPIDO_MS      40       // velocidade do pisca perto dos 10s
@@ -82,39 +109,38 @@ extern "C" {
 /* --- LED de status da conexao Wi-Fi (ver secao mais abaixo) --- */
 #define PISCA_TENTANDO_MS    150      // pisca rapido e constante = tentando conectar
 
-/* --- Comando remoto de reinicio, via /att no servidor (ver secao mais abaixo) --- */
-#define INTERVALO_COMANDO_MS  7000UL  // frequencia da checagem (nao bloqueante)
+/* --- Reinicio remoto (poll da pagina /att do servidor) --- */
+#define INTERVALO_COMANDO_MS 7000UL
 
 /* --- OTA via GitHub --- */
 
 // So um rotulo pra humano ler no Serial - nao tem efeito na logica de OTA
 // (a comparacao de versao usa o hash do version.txt, nao isto aqui).
-#define FIRMWARE_VERSION       "v12-comando-remoto"
+#define FIRMWARE_VERSION       "v12-esp32-comando-remoto"
 
 #define OTA_GITHUB_USER        "vinilima-br"
 #define OTA_GITHUB_REPO        "garcom-firmware"
 #define OTA_GITHUB_BRANCH      "main"
 
 // --- Trava de seguranca da OTA ---
-// EEPROM (sobrevive a power-cycle) guarda qual foi a ultima versao do
-// version.txt ja "resolvida" (aplicada com sucesso, ou desistida apos
-// esgotar as tentativas). Uma versao nova ganha ate OTA_LIMITE_TENTATIVAS
-// tentativas (uma por boot); depois disso o Gateway para de tentar ate o
-// version.txt apontar pra um valor diferente. Isso impede loop infinito
-// de auto-atualizacao mesmo se um firmware.bin invalido for publicado.
-#define OTA_EEPROM_MAGIC        0xB16B00B5UL
+// Preferences (NVS) guarda qual foi a ultima versao do version.txt ja
+// "resolvida" (aplicada com sucesso, ou desistida apos esgotar as
+// tentativas). Uma versao nova ganha ate OTA_LIMITE_TENTATIVAS tentativas
+// (uma por boot); depois disso o Gateway para de tentar ate o version.txt
+// apontar pra um valor diferente. Isso impede loop infinito de
+// auto-atualizacao mesmo se um firmware.bin invalido for publicado.
+// (No ESP8266 isso era um struct com numero magico gravado na EEPROM em
+// bytes fixos; no ESP32 o NVS ja resolve "primeira vez sem estado" sozinho
+// -  getString/getUChar simplesmente devolvem o valor padrao se a chave
+// ainda nao existir, sem precisar de magic number.)
 #define OTA_LIMITE_TENTATIVAS   3
-#define OTA_VERSAO_TAM          40   // bytes reservados por string de versao na EEPROM
 
-struct EstadoOTA {
-  uint32_t magic;
-  char     versaoResolvida[OTA_VERSAO_TAM];    // ja aplicada com sucesso, ou desistida - nao mexe mais nela
-  char     versaoEmTentativa[OTA_VERSAO_TAM];  // versao "pendente" acumulando tentativas agora
-  uint8_t  tentativasFalhas;                   // tentativas seguidas SEM sucesso, so da versaoEmTentativa
-};
+Preferences prefsOTA;
 
 /* --- CSS do portal: tema NEON v3, jovem e responsivo --- */
-/* SEM PROGMEM - ver armadilha 17 no documento do projeto. Fica na RAM.     */
+/* Sem PROGMEM: no ESP8266 era decisao deliberada (ver armadilha 17 do doc  */
+/* do projeto). No ESP32 PROGMEM nem faz diferenca - a flash ja e' mapeada  */
+/* na memoria - mas deixamos como const char[] comum dos dois jeitos.       */
 
 const char PORTAL_CSS[] =
   "<style>"
@@ -269,6 +295,10 @@ typedef struct __attribute__((packed)) {
 } PacoteChamado;
 
 /* --------------------------- FILA DE CHAMADOS ---------------------------- */
+/* Fila circular de produtor unico (callback do ESP-NOW) / consumidor unico
+   (loop()) - segura sem lock/portMUX mesmo no ESP32 dual-core, porque cada
+   lado so' escreve o proprio indice (fila_entrada so' e' escrito por quem
+   produz, fila_saida so' por quem consome). Mesma logica do ESP8266. */
 
 #define FILA_TAM 8
 
@@ -300,15 +330,33 @@ void macParaTexto(const uint8_t *mac, char *saida) {
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-void ledOn()  { digitalWrite(LED_BUILTIN, LOW);  }  // ESP8266: LOW = aceso
-void ledOff() { digitalWrite(LED_BUILTIN, HIGH); }  // ESP8266: HIGH = apagado
+// ESP.getResetReason() (ESP8266) devolvia direto uma String amigavel
+// ("Power on", "External System"...). No ESP32 o equivalente nativo,
+// esp_reset_reason(), devolve so um enum numerico - esta funcao traduz os
+// motivos mais comuns pra texto, só pra manter o Serial legivel.
+const char *motivoBootTexto(esp_reset_reason_t motivo) {
+  switch (motivo) {
+    case ESP_RST_POWERON:   return "ligou na tomada (power on)";
+    case ESP_RST_SW:        return "reinicio por software (ESP.restart)";
+    case ESP_RST_PANIC:     return "panico/exception no firmware";
+    case ESP_RST_INT_WDT:   return "watchdog interno (travou algo)";
+    case ESP_RST_TASK_WDT:  return "watchdog de tarefa (travou algo)";
+    case ESP_RST_WDT:       return "outro watchdog";
+    case ESP_RST_BROWNOUT:  return "brownout (queda de tensao)";
+    case ESP_RST_EXT:       return "reset externo (botao EN)";
+    default:                return "outro/desconhecido";
+  }
+}
+
+void ledOn()  { digitalWrite(PINO_LED, HIGH); }  // ESP32: HIGH = aceso (nao invertido)
+void ledOff() { digitalWrite(PINO_LED, LOW);  }
 
 /* -------------------- LED: feedback visual da conexao Wi-Fi --------------- */
 /* wm.autoConnect() e a espera do portal de configuracao sao chamadas
    BLOQUEANTES - o loop() normal (onde o botao de reset pisca o LED com
    millis()) nao roda enquanto elas duram. Por isso aqui usamos Ticker
-   (incluido no core ESP8266, nenhuma lib nova): ele dispara por interrupcao
-   de hardware e continua piscando o LED mesmo com o sketch inteiro "preso"
+   (parte do core ESP32, nenhuma lib nova): ele dispara por interrupcao de
+   hardware e continua piscando o LED mesmo com o sketch inteiro "preso"
    dentro do WiFiManager.
 
    Tres padroes, de proposito bem diferentes entre si:
@@ -322,7 +370,7 @@ bool   piscaWifiEstado = false;
 
 void piscaWifiToggle() {
   piscaWifiEstado = !piscaWifiEstado;
-  digitalWrite(LED_BUILTIN, piscaWifiEstado ? LOW : HIGH);
+  digitalWrite(PINO_LED, piscaWifiEstado ? HIGH : LOW);
 }
 
 void iniciarLedTentandoConectar() {
@@ -336,7 +384,7 @@ const uint16_t PADRAO_FALHA_MS[] = { 100, 120, 100, 700 };
 uint8_t        passoPadraoFalha  = 0;
 
 void avancaPadraoFalha() {
-  digitalWrite(LED_BUILTIN, (passoPadraoFalha % 2 == 0) ? LOW : HIGH);
+  digitalWrite(PINO_LED, (passoPadraoFalha % 2 == 0) ? HIGH : LOW);
   piscaWifiTicker.once_ms(PADRAO_FALHA_MS[passoPadraoFalha], avancaPadraoFalha);
   passoPadraoFalha = (passoPadraoFalha + 1) % 4;
 }
@@ -357,7 +405,8 @@ void avisarWifiConectado() {
 }
 
 /* --------------------------- OTA VIA GITHUB ------------------------------- */
-/* Mesma logica ja confirmada em hardware no etapa3_3_ota_teste.ino. Nunca
+/* Mesma logica ja usada no ESP8266, com a trava de seguranca migrada de
+   EEPROM (struct + numero magico) pra Preferences/NVS (por chave). Nunca
    trava e nunca impede o resto do setup() de continuar: qualquer falha so
    escreve no Serial e retorna. */
 
@@ -371,38 +420,23 @@ String otaFirmwareUrl() {
          "/" + OTA_GITHUB_REPO + "/" + OTA_GITHUB_BRANCH + "/firmware.bin";
 }
 
-/* Copia uma String pro campo fixo do EstadoOTA, sempre terminando em \0 -
-   nunca deixa passar do tamanho reservado, mesmo que venha algo maior. */
-void copiarVersaoPraEstado(char *destino, const String &origem) {
-  strncpy(destino, origem.c_str(), OTA_VERSAO_TAM - 1);
-  destino[OTA_VERSAO_TAM - 1] = '\0';
-}
-
 void verificarAtualizacaoOTA() {
   Serial.println(F("[ota] verificando firmware novo no GitHub..."));
 
-  EEPROM.begin(sizeof(EstadoOTA));
-  EstadoOTA estado;
-  EEPROM.get(0, estado);
-  if (estado.magic != OTA_EEPROM_MAGIC) {
-    // primeira vez que esta area de EEPROM e usada (ou veio "suja") -
-    // comeca do zero, sem nenhuma versao resolvida/em tentativa ainda.
-    Serial.println(F("[ota] EEPROM sem estado valido ainda - comecando do zero"));
-    estado.magic = OTA_EEPROM_MAGIC;
-    estado.versaoResolvida[0]   = '\0';
-    estado.versaoEmTentativa[0] = '\0';
-    estado.tentativasFalhas     = 0;
-  }
+  prefsOTA.begin("ota", false);   // namespace "ota" no NVS, modo leitura+escrita
+  String  versaoResolvida   = prefsOTA.getString("resolvida", "");
+  String  versaoEmTentativa = prefsOTA.getString("tentativa", "");
+  uint8_t tentativasFalhas  = prefsOTA.getUChar("falhas", 0);
 
-  BearSSL::WiFiClientSecure clienteSeguro;
-  clienteSeguro.setInsecure();   // sem validar certificado - decisao registrada no doc do projeto
+  WiFiClientSecure clienteSeguro;
+  clienteSeguro.setInsecure();   // sem validar certificado - mesma decisao registrada no doc do projeto
 
   HTTPClient http;
   String urlVersao = otaVersionUrl();
 
   if (!http.begin(clienteSeguro, urlVersao)) {
     Serial.println(F("[ota] nao consegui abrir a URL de versao - seguindo sem atualizar"));
-    EEPROM.end();
+    prefsOTA.end();
     return;
   }
   http.setTimeout(8000);
@@ -413,7 +447,7 @@ void verificarAtualizacaoOTA() {
     Serial.print(codigo);
     Serial.println(F(" - seguindo sem atualizar"));
     http.end();
-    EEPROM.end();
+    prefsOTA.end();
     return;
   }
 
@@ -424,80 +458,69 @@ void verificarAtualizacaoOTA() {
   Serial.print(F("[ota] versao publicada no GitHub  : "));
   Serial.println(versaoRemota);
   Serial.print(F("[ota] ultima versao ja resolvida  : "));
-  if (estado.versaoResolvida[0]) {
-    Serial.println(estado.versaoResolvida);
-  } else {
-    Serial.println(F("(nenhuma ainda)"));
-  }
+  Serial.println(versaoResolvida.length() ? versaoResolvida : String("(nenhuma ainda)"));
 
   if (versaoRemota.length() == 0) {
     Serial.println(F("[ota] version.txt veio vazio - seguindo sem atualizar"));
-    EEPROM.end();
-    return;
-  }
-
-  if (versaoRemota.length() >= OTA_VERSAO_TAM) {
-    Serial.println(F("[ota] version.txt maior do que o esperado - ignorando por seguranca"));
-    EEPROM.end();
+    prefsOTA.end();
     return;
   }
 
   // Ja resolvida antes (aplicada com sucesso OU desistida por esgotar
   // tentativas) - nao faz nada, seja qual for o motivo.
-  if (versaoRemota == estado.versaoResolvida) {
+  if (versaoRemota == versaoResolvida) {
     Serial.println(F("[ota] ja estou na versao mais recente (ou ja desisti dela) - nada a fazer"));
-    EEPROM.end();
+    prefsOTA.end();
     return;
   }
 
   // E uma versao "pendente" diferente da que estava em tentativa? Reseta o
   // contador - e um alvo novo, merece as tentativas dele do zero.
-  if (versaoRemota != estado.versaoEmTentativa) {
+  if (versaoRemota != versaoEmTentativa) {
     Serial.println(F("[ota] versao nova (nunca tentada) - comecando contagem de tentativas do zero"));
-    copiarVersaoPraEstado(estado.versaoEmTentativa, versaoRemota);
-    estado.tentativasFalhas = 0;
+    prefsOTA.putString("tentativa", versaoRemota);
+    tentativasFalhas = 0;
   }
 
   Serial.println(F("[ota] baixando e gravando..."));
   Serial.println(F("[ota] NAO desligue a placa agora"));
 
-  ESPhttpUpdate.setLedPin(LED_BUILTIN, LOW);   // LOW = aceso, mesma convencao do resto do projeto
+  httpUpdate.setLedPin(PINO_LED, HIGH);   // HIGH = aceso, mesma convencao do resto do projeto
 
   // rebootOnUpdate(false): com true, a propria lib chama ESP.restart() de
   // dentro do update(), antes de devolver o controle - o que impediria a
-  // gravacao da EEPROM abaixo de rodar em caso de sucesso. Com false, quem
-  // reinicia (so depois de confirmar a EEPROM) somos nos, mais abaixo.
-  ESPhttpUpdate.rebootOnUpdate(false);
+  // gravacao do NVS abaixo de rodar em caso de sucesso. Com false, quem
+  // reinicia (so depois de confirmar a gravacao) somos nos, mais abaixo.
+  httpUpdate.rebootOnUpdate(false);
 
-  t_httpUpdate_return resultado = ESPhttpUpdate.update(clienteSeguro, otaFirmwareUrl());
+  t_httpUpdate_return resultado = httpUpdate.update(clienteSeguro, otaFirmwareUrl());
 
   switch (resultado) {
     case HTTP_UPDATE_FAILED: {
-      estado.tentativasFalhas++;
+      tentativasFalhas++;
       Serial.printf("[ota] FALHOU (erro %d): %s\n",
-                     ESPhttpUpdate.getLastError(),
-                     ESPhttpUpdate.getLastErrorString().c_str());
+                     httpUpdate.getLastError(),
+                     httpUpdate.getLastErrorString().c_str());
       Serial.print(F("[ota] tentativa "));
-      Serial.print(estado.tentativasFalhas);
+      Serial.print(tentativasFalhas);
       Serial.print(F(" de "));
       Serial.print(OTA_LIMITE_TENTATIVAS);
       Serial.println(F(" pra essa versao"));
 
-      if (estado.tentativasFalhas >= OTA_LIMITE_TENTATIVAS) {
+      prefsOTA.putUChar("falhas", tentativasFalhas);
+
+      if (tentativasFalhas >= OTA_LIMITE_TENTATIVAS) {
         // TRAVA DE SEGURANCA: esgotou as tentativas - marca como
         // "resolvida" (mesmo sem sucesso) pra PARAR de tentar essa mesma
         // versao pra sempre. So volta a tentar OTA quando o version.txt
         // apontar pra outro valor (ou seja, um firmware.bin novo).
         Serial.println(F("[ota] *** LIMITE ATINGIDO - desistindo desta versao ***"));
         Serial.println(F("[ota] nao vou tentar de novo ate um firmware.bin novo ser publicado"));
-        copiarVersaoPraEstado(estado.versaoResolvida, versaoRemota);
+        prefsOTA.putString("resolvida", versaoRemota);
       } else {
         Serial.println(F("[ota] vou tentar de novo no proximo boot"));
       }
       Serial.println(F("[ota] continuando com o firmware atual, sem reiniciar"));
-
-      EEPROM.put(0, estado);
-      EEPROM.commit();
       break;
     }
 
@@ -507,24 +530,37 @@ void verificarAtualizacaoOTA() {
 
     case HTTP_UPDATE_OK:
       Serial.println(F("[ota] gravado com sucesso! marcando como resolvida..."));
-      copiarVersaoPraEstado(estado.versaoResolvida, versaoRemota);
-      estado.tentativasFalhas = 0;
-      EEPROM.put(0, estado);
-      EEPROM.commit();   // GARANTIDO gravado antes do reboot - e por isso que reiniciamos so aqui embaixo
-      EEPROM.end();
+      prefsOTA.putString("resolvida", versaoRemota);
+      prefsOTA.putUChar("falhas", 0);
+      prefsOTA.end();   // GARANTIDO gravado antes do reboot - por isso reiniciamos so' aqui embaixo
       Serial.println(F("[ota] reiniciando agora..."));
       delay(200);        // da tempo do Serial esvaziar antes de reiniciar
-      ESP.restart();     // agora SOMOS NOS que reiniciamos, so depois do commit confirmado
+      ESP.restart();     // agora SOMOS NOS que reiniciamos, so depois da gravacao confirmada
       break;             // nunca chega aqui de verdade
   }
 
-  EEPROM.end();
+  prefsOTA.end();
 }
 
 /* ----------------------- CALLBACK DE RECEPCAO ESP-NOW -------------------- */
+/* A assinatura deste callback MUDOU entre versoes do core Arduino ESP32:
+   - core < 3.0 (IDF < 5.x): void cb(const uint8_t *mac, const uint8_t *dados, int tamanho)
+   - core >= 3.0 (IDF >= 5.x): o MAC deixou de vir direto e passou pra dentro
+     de um esp_now_recv_info_t (info->src_addr).
+   ESP_ARDUINO_VERSION/ESP_ARDUINO_VERSION_VAL vem do core_version.h (incluido
+   junto do Arduino.h) - o bloco abaixo escolhe a assinatura certa sozinho,
+   sem depender de qual core exato esta instalado no Arduino IDE de quem for
+   compilar. */
 
-void aoReceber(uint8_t *macRemetente, uint8_t *dados, uint8_t tamanho) {
-  if (tamanho != sizeof(PacoteChamado)) return;
+#if defined(ESP_ARDUINO_VERSION) && defined(ESP_ARDUINO_VERSION_VAL) && \
+    ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+  #define GARCOM_ESPNOW_CB_NOVO 1
+#else
+  #define GARCOM_ESPNOW_CB_NOVO 0
+#endif
+
+void processarPacoteRecebido(const uint8_t *macRemetente, const uint8_t *dados, int tamanho) {
+  if (tamanho != (int)sizeof(PacoteChamado)) return;
 
   uint8_t proxima = (fila_entrada + 1) % FILA_TAM;
   if (proxima == fila_saida) {
@@ -540,6 +576,16 @@ void aoReceber(uint8_t *macRemetente, uint8_t *dados, uint8_t tamanho) {
   fila_entrada = proxima;
 }
 
+#if GARCOM_ESPNOW_CB_NOVO
+void aoReceber(const esp_now_recv_info_t *info, const uint8_t *dados, int tamanho) {
+  processarPacoteRecebido(info->src_addr, dados, tamanho);
+}
+#else
+void aoReceber(const uint8_t *macRemetente, const uint8_t *dados, int tamanho) {
+  processarPacoteRecebido(macRemetente, dados, tamanho);
+}
+#endif
+
 /* ------------------- CALLBACK: PORTAL DE CONFIGURACAO ABRIU --------------- */
 
 void aoAbrirPortal(WiFiManager *wm) {
@@ -551,11 +597,14 @@ void aoAbrirPortal(WiFiManager *wm) {
 }
 
 /* ------------------------- DESCOBRIR O SERVIDOR --------------------------- */
-/* Estratégia (v9): mDNS primeiro (funciona quando o Gateway está na MESMA
-   rede local do mini PC — ex.: "Casa"), com fallback pra URL fixa do
-   Cloudflare Tunnel via HTTPS (funciona de qualquer rede — ex.: Gateway
-   instalado num estabelecimento remoto, onde o mDNS nunca vai achar nada
-   porque mDNS não atravessa redes diferentes). */
+/* mDNS primeiro (funciona quando o Gateway esta na MESMA rede local do mini
+   PC - ex.: "Casa"), com fallback pra URL fixa do Cloudflare Tunnel via
+   HTTPS (funciona de qualquer rede - ex.: Gateway instalado num
+   estabelecimento remoto, onde o mDNS nunca vai achar nada porque mDNS nao
+   atravessa redes diferentes). queryService() e' igual ao ESP8266, mas os
+   metodos de resultado tem OUTRO NOME no ESPmDNS do ESP32: nao existe
+   answerIP()/answerPort() (isso e' so' do ESP8266mDNS) - aqui e' address()
+   e port(). */
 
 void descobrirServidor() {
   Serial.print(F("[mdns] procurando '_"));
@@ -567,8 +616,8 @@ void descobrirServidor() {
   for (int tentativa = 0; tentativa < TENTATIVAS_MDNS; tentativa++) {
     int n = MDNS.queryService(SERVICO_MDNS, PROTOCOLO_MDNS);
     if (n > 0) {
-      IPAddress ip = MDNS.answerIP(0);
-      uint16_t porta = MDNS.answerPort(0);
+      IPAddress ip = MDNS.address(0);
+      uint16_t porta = MDNS.port(0);
       url_servidor = "http://" + ip.toString() + ":" + String(porta) + "/chamar";
       achou_por_mdns = true;
       Serial.println(F(" achado!"));
@@ -580,7 +629,7 @@ void descobrirServidor() {
     delay(500);
   }
 
-  // mDNS não achou nada — provavelmente o Gateway está numa rede diferente
+  // mDNS nao achou nada - provavelmente o Gateway esta numa rede diferente
   // da rede de casa (ex.: instalado num estabelecimento remoto). Usa a URL
   // fixa do Cloudflare Tunnel, que funciona de qualquer lugar via HTTPS.
   Serial.println(F(" nao achei"));
@@ -590,54 +639,63 @@ void descobrirServidor() {
   Serial.println(url_servidor);
 }
 
-/* ------------------- COMANDO REMOTO: REINICIO VIA /att -------------------- */
-/* O servidor nunca empurra nada por conta propria pro Gateway - so responde
-   quando perguntado. Aqui a gente pergunta periodicamente (nao bloqueante,
-   com millis(), do mesmo jeito que o botao de reset e o relatorio de status
-   em loop()) se tem algum reinicio pendente - acionado pelo garcom
-   acessando .../att e digitando a senha.
+/* -------------------- REINICIO REMOTO (poll de /gateway/comando) ---------- */
+/* RECONSTRUCAO da v12 (o .ino literal dela nao estava disponivel nesta
+   sessao - isto segue a especificacao escrita no doc do projeto). O Gateway
+   nunca recebe nada empurrado pelo servidor - so' faz POST /chamar. Pra um
+   clique na pagina /att (do lado do servidor) conseguir reiniciar o
+   hardware, o firmware pergunta periodicamente (poll, NAO bloqueante, mesmo
+   padrao millis() de verificarBotaoReset()/relatorio de status) se ha
+   comando pendente.
 
-   Resposta e texto puro "1"/"0" (sem JSON), do mesmo jeito que o
-   version.txt do OTA - nenhuma lib de parsing nova precisa entrar so por
-   causa disso. O servidor entrega o "1" uma UNICA vez (zera a flag dele
-   mesmo no instante que responde), entao mesmo que a checagem seguinte
-   aconteca logo depois de um boot, ela vai ver "0" - sem risco de loop de
-   reinicio. */
+   Resposta esperada em TEXTO PURO "1" ou "0" (sem JSON - mesma filosofia do
+   version.txt do OTA). Entrega unica: o servidor ja zera a flag no mesmo GET
+   que responde "1", entao mesmo que o Gateway pergunte de novo rapido (ou
+   reinicie e pergunte outra vez), nunca ha um segundo "1" pro mesmo pedido -
+   sem risco de loop de reinicio.
+
+   Reaproveita a mesma URL que descobrirServidor() ja resolveu (mdns local OU
+   fallback Cloudflare), so troca o sufixo "/chamar" por "/gateway/comando",
+   e a mesma logica de escolha HTTP/HTTPS de enviarPost(). */
 
 void verificarComandoRemoto() {
-  static unsigned long ultima_checagem = 0;
-  if (millis() - ultima_checagem < INTERVALO_COMANDO_MS) return;
-  ultima_checagem = millis();
+  static unsigned long ultima_verificacao = 0;
+  if (millis() - ultima_verificacao < INTERVALO_COMANDO_MS) return;
+  ultima_verificacao = millis();
 
-  if (WiFi.status() != WL_CONNECTED || url_servidor.length() == 0) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (url_servidor.length() == 0) return;
 
-  // mesma base (host/protocolo) que descobrirServidor() ja escolheu pra
-  // enviar os chamados - so troca o final "/chamar" por "/gateway/comando"
   String urlComando = url_servidor;
   urlComando.replace("/chamar", "/gateway/comando");
 
   bool usaHttps = urlComando.startsWith("https://");
-  WiFiClient clienteHttp;
-  BearSSL::WiFiClientSecure clienteHttps;
-  if (usaHttps) clienteHttps.setInsecure();  // mesma decisao do OTA e do enviarPost()
+
+  WiFiClient       clienteHttp;
+  WiFiClientSecure clienteHttps;
+  if (usaHttps) {
+    clienteHttps.setInsecure();   // mesma decisao do OTA/enviarPost()
+  }
 
   HTTPClient http;
   bool comecou = usaHttps ? http.begin(clienteHttps, urlComando)
                           : http.begin(clienteHttp, urlComando);
-  if (!comecou) return;
+  if (!comecou) return;   // falha silenciosa - tenta de novo no proximo ciclo
 
-  http.setTimeout(usaHttps ? 6000 : 3000);
+  http.setTimeout(usaHttps ? 8000 : 5000);
   int codigo = http.GET();
+
   if (codigo == 200) {
     String corpo = http.getString();
     corpo.trim();
     if (corpo == "1") {
-      Serial.println(F("[comando] reinicio solicitado remotamente (via /att) - reiniciando..."));
+      Serial.println(F("[comando] reinicio remoto solicitado via /att - reiniciando..."));
       http.end();
       delay(200);
       ESP.restart();
     }
   }
+
   http.end();
 }
 
@@ -649,15 +707,15 @@ void setup() {
   Serial.println();
   Serial.println();
   Serial.println(F("=============================================="));
-  Serial.println(F("   ETAPA 3.1 FINAL v8  -  GATEWAY (neon + OTA, compilado via GitHub Action)"));
+  Serial.println(F("   GATEWAY ESP32 (porte do ESP8266, neon + OTA + comando remoto)"));
   Serial.println(F("=============================================="));
   Serial.print(F("versao deste firmware : "));
   Serial.println(FIRMWARE_VERSION);
   Serial.print(F("motivo do ultimo boot : "));
-  Serial.println(ESP.getResetReason());
+  Serial.println(motivoBootTexto(esp_reset_reason()));
   Serial.println();
 
-  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(PINO_LED, OUTPUT);
   ledOff();
 
   pinMode(PINO_BOTAO_RESET, INPUT_PULLUP);
@@ -670,7 +728,7 @@ void setup() {
   wm.setTitle("Painel do Garcom");
   wm.setScanDispPerc(true);
   wm.setAPCallback(aoAbrirPortal);
-  wm.setCustomHeadElement(PORTAL_CSS);   // sem PROGMEM - ver armadilha 17
+  wm.setCustomHeadElement(PORTAL_CSS);
 
   Serial.println(F("[wifi] tentando rede salva (WiFiManager)..."));
   iniciarLedTentandoConectar();   // pisca rapido e constante: tentando conectar
@@ -692,16 +750,15 @@ void setup() {
   Serial.print(F("[wifi] IP do gateway : "));
   Serial.println(WiFi.localIP());
 
-  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  WiFi.setSleep(false);   // radio sempre ativo - Gateway fica na tomada, sem motivo pra economizar
 
   // O canal do roteador pode mudar (a mesa se adapta sozinha via channel
   // hopping) - aqui so registra o canal atual, pra referencia/depuracao.
-  uint8_t canal = wifi_get_channel();
   Serial.print(F("[wifi] canal do roteador agora : "));
-  Serial.println(canal);
+  Serial.println(WiFi.channel());
 
   /* --- Checagem de OTA: SO AQUI, com Wi-Fi ja estavel, ANTES do          */
-  /* mDNS/ESP-NOW nascerem (ver explicacao no cabecalho deste arquivo) --- */
+  /* mDNS/ESP-NOW nascerem (mesma ordem do ESP8266) --- */
 
   verificarAtualizacaoOTA();
 
@@ -711,29 +768,35 @@ void setup() {
 
   descobrirServidor();
 
-  if (esp_now_init() != 0) {
+  // ESP-NOW no ESP32 exige o modo Wi-Fi explicito antes do init. Depois do
+  // wm.autoConnect() o radio ja deve estar em WIFI_STA, mas deixamos
+  // explicito por seguranca/clareza (nao tem custo, e' idempotente).
+  WiFi.mode(WIFI_STA);
+
+  if (esp_now_init() != ESP_OK) {
     Serial.println(F("[espnow] ERRO: esp_now_init() falhou. Reiniciando..."));
     delay(3000);
     ESP.restart();
   }
 
-  esp_now_set_self_role(ESP_NOW_ROLE_SLAVE);
   esp_now_register_recv_cb(aoReceber);
 
   Serial.print(F("[espnow] ouvindo no canal "));
-  Serial.println(wifi_get_channel());
+  Serial.println(WiFi.channel());
   Serial.print(F("[espnow] MAC deste gateway : "));
   Serial.println(WiFi.macAddress());
 
   Serial.println();
-  Serial.print(F("[reset-wifi] segure o botao do D5 por "));
+  Serial.print(F("[reset-wifi] segure o botao (GPIO"));
+  Serial.print(PINO_BOTAO_RESET);
+  Serial.print(F(") por "));
   Serial.print(TEMPO_RESET_MS / 1000);
   Serial.println(F("s para reconfigurar o Wi-Fi"));
   Serial.println();
   Serial.println(F("pronto. aguardando chamados...\n"));
 }
 
-/* ---------------------- BOTAO DE RESET DO WI-FI (D5) ----------------------- */
+/* ------------------- BOTAO DE RESET DO WI-FI (GPIO configuravel) ---------- */
 /* Nao-bloqueante: roda a cada volta do loop(), sem delay() longo, para nao
    atrapalhar a recepcao de ESP-NOW nem o processamento da fila.
    Enquanto o botao esta pressionado, o LED pisca cada vez mais rapido -
@@ -796,9 +859,11 @@ void verificarBotaoReset() {
 /* ---------------------------------- LOOP ---------------------------------- */
 
 void loop() {
-  MDNS.update();
+  // Sem MDNS.update() aqui de proposito - no ESP32 o mDNS roda em tarefa
+  // propria do SDK (diferente do ESP8266, que exigia chamar isso a cada volta).
+
   verificarBotaoReset();
-  verificarComandoRemoto();
+  verificarComandoRemoto();   // NOVO (v12): poll do reinicio remoto via /att
 
   if (fila_saida != fila_entrada) {
     ItemFila item;
@@ -857,8 +922,8 @@ void loop() {
 /* Suporta tanto HTTP puro (servidor achado via mDNS na rede local, URL tipo
    "http://192.168.x.x:5000/chamar") quanto HTTPS (fallback pro Cloudflare
    Tunnel, URL tipo "https://garcom.meuchapa.stream/chamar"). O tipo de
-   WiFiClient usado precisa bater com o esquema da URL — daí a checagem
-   de "https://" logo no início pra escolher qual dos dois usar. */
+   cliente usado precisa bater com o esquema da URL - dai a checagem de
+   "https://" logo no inicio pra escolher qual dos dois usar. */
 
 void enviarPost(const char *mac) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -869,8 +934,8 @@ void enviarPost(const char *mac) {
 
   bool usaHttps = url_servidor.startsWith("https://");
 
-  WiFiClient clienteHttp;
-  BearSSL::WiFiClientSecure clienteHttps;
+  WiFiClient       clienteHttp;
+  WiFiClientSecure clienteHttps;
   if (usaHttps) {
     clienteHttps.setInsecure();  // sem validar certificado - mesma decisao do OTA
   }
