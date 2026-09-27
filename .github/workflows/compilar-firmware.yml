@@ -1,58 +1,53 @@
 # PROJETO GARCOM - compila o .ino automaticamente e gera o firmware.bin
+#                  POR DISPOSITIVO (uma pasta por Gateway, pelo MAC)
 #
-# O QUE FAZ: toda vez que voce sobe/edita um arquivo .ino em qualquer pasta
-# do repositorio (upload direto pelo site do GitHub, ou git push), esta
-# Action roda sozinha, acha a pasta do sketch automaticamente, instala o
-# core ESP8266 e a lib WiFiManager, COMPILA o codigo (igual o Arduino IDE
-# faria no seu PC), gera o firmware.bin e commita ele de volta no
-# repositorio. A Action "atualizar-versao.yml" (ja instalada) entao detecta
-# essa mudanca no firmware.bin e atualiza o version.txt sozinha - as duas
-# juntas fecham o ciclo inteiro: voce sobe o .ino, o resto acontece
-# sozinho, igual e hoje (so que sem voce precisar compilar nem exportar
-# nada na sua maquina).
+# O QUE MUDOU (27/09/2026): antes existia UM firmware.bin so, na raiz, e
+# todos os Gateways baixavam o mesmo arquivo - com Gateways ESP8266 e ESP32
+# misturados (e um por estabelecimento) isso nao funciona mais. Agora cada
+# Gateway tem a SUA pasta, com o nome = tipo da placa + "_" + MAC:
 #
-# COMO FUNCIONA A BUSCA DA PASTA: nao existe um caminho fixo no workflow.
-# A Action olha qual .ino mudou no PROPRIO commit que ela esta processando
-# (git diff do commit) - por isso funciona certinho mesmo com varias pastas
-# de versoes antigas (v6, v7, v8...) espalhadas pelo repositorio, sem
-# confundir uma com a outra. Regra do Arduino: a pasta precisa ter o mesmo
-# nome do .ino dentro dela (ex: etapa3_gateway_final_v8/etapa3_gateway_final_v8.ino).
-# Se subir uma pasta nova assim, a Action encontra sozinha - voce NUNCA
-# precisa editar este arquivo pra apontar o caminho.
+#     esp32_A4-CF-12-F0-93-90/        <- Gateway ESP32 com MAC A4:CF:12:F0:93:90
+#     esp8266_2C-F4-32-AA-BB-CC/      <- Gateway ESP8266 com MAC 2C:F4:32:AA:BB:CC
 #
-# Sintaxe confirmada contra a documentacao oficial do arduino-cli
-# (docs.arduino.cc/arduino-cli) e o README oficial da action
-# arduino/setup-arduino-cli (versao atual: v2) em 24/08/2026.
+#   Regras do nome da pasta (a Action recusa com erro claro se estiver fora):
+#     - comeca com esp32_ ou esp8266_ (minusculo) -> define como compilar
+#     - MAC em MAIUSCULO, com "-" no lugar de ":" (":" nao pode em nome de
+#       pasta no Windows). O Gateway mostra o nome exato no Serial no boot:
+#       "[ota] minha pasta no GitHub      : esp32_A4-CF-12-F0-93-90"
 #
-# COMO INSTALAR (uma vez so, igual voce ja fez com a atualizar-versao.yml):
-#   1. No repositorio (vinilima-br/garcom-firmware) no site do GitHub:
-#      Add file -> Create new file
-#   2. No campo de nome do arquivo, digite exatamente:
-#        .github/workflows/compilar-firmware.yml
-#   3. Cole o conteudo deste arquivo inteiro
-#   4. Commit direto na branch main
+# COMO PUBLICAR UMA VERSAO PRA UM GATEWAY:
+#   Suba o .ino DENTRO da pasta dele (pode ter qualquer nome, ex:
+#   esp32_A4-CF-12-F0-93-90/gateway_esp32_v14.ino). Pode deixar as versoes
+#   antigas la dentro - a Action compila SO o .ino que mudou no commit.
+#   Ela gera, dentro da MESMA pasta:
+#       firmware.bin  (compilado pra placa certa: ESP32 ou ESP8266)
+#       version.txt   (hash do firmware.bin, calculado aqui mesmo)
+#   e o Gateway com aquele MAC baixa no proximo boot. Nenhum outro Gateway
+#   enxerga essa pasta.
 #
-# A PARTIR DAI, o unico passo manual pra publicar uma versao nova e:
-#   1. Criar uma pasta nova (ex: meu_sketch_v8/) com o .ino dentro
-#      (Add file -> Upload files, arrastando so o .ino - o GitHub cria a
-#      pasta sozinho se voce digitar "meu_sketch_v8/meu_sketch_v8.ino" no
-#      nome, ou voce cria a pasta antes e sobe o arquivo dentro dela)
-#   2. Commitar
-#   Pronto. As duas Actions fazem o resto: compilam, geram o firmware.bin,
-#   calculam o version.txt, e o Gateway (com a trava do v7, ver o doc do
-#   projeto) baixa e aplica sozinho no proximo boot.
+# PROTECOES:
+#   - Pasta esp32_  -> compila com o core ESP32. Se o .ino for de ESP8266,
+#     a compilacao FALHA e nada e publicado (e vice-versa).
+#   - Dois .ino mudados pra mesma pasta no mesmo commit -> recusa (ambiguo:
+#     nao da pra saber qual e "a" versao nova). Suba um de cada vez.
+#   - Se um .ino falhar, nenhum firmware.bin desse commit e publicado.
 #
-# REQUISITO: um secret chamado FIRMWARE_PAT com um Personal Access Token
-# (fine-grained, permissao "Contents: Read and write" so neste repositorio)
-# precisa estar salvo em Settings -> Secrets and variables -> Actions do
-# repositorio. Motivo: um push feito com o GITHUB_TOKEN automatico do
-# proprio GitHub Actions NUNCA dispara outro workflow (protecao anti-loop
-# deliberada do GitHub, documentada em
-# docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)
-# - por isso o commit do firmware.bin feito por esta Action nao acionava a
-# atualizar-versao.yml sozinho. Usando um PAT proprio no lugar do token
-# automatico, o encadeamento das duas Actions passa a funcionar de ponta a
-# ponta sem esse bloqueio.
+# LEGADO (so pra migrar Gateways ESP8266 antigos, que ainda leem a RAIZ):
+#   .ino fora de uma pasta de dispositivo (ex: v6/v6.ino) continua sendo
+#   compilado pra ESP8266 e gravado em firmware.bin/version.txt da RAIZ,
+#   igual era antes. Depois que todos os Gateways estiverem na versao "por
+#   MAC", a raiz deixa de ser usada por eles.
+#
+# Rodar manualmente (aba Actions -> este workflow -> Run workflow): informe
+# o caminho do .ino no campo "ino".
+#
+# REQUISITO (ja configurado): secret FIRMWARE_PAT (PAT fine-grained,
+# "Contents: Read and write" so neste repositorio). Motivo: push feito com
+# o GITHUB_TOKEN automatico nunca dispara outro workflow (protecao anti-loop
+# do GitHub) - com o PAT a atualizar-versao.yml continua sendo acionada.
+#
+# Versoes fixadas (as mesmas testadas compilando os dois Gateways em 27/09/2026):
+#   core ESP8266 3.1.2 | core ESP32 3.3.12 | WiFiManager 2.0.17
 
 name: Compilar firmware.bin a partir do .ino
 
@@ -61,10 +56,26 @@ on:
     branches: [ main ]
     paths:
       - '**.ino'
-  workflow_dispatch:   # tambem permite rodar manualmente pela aba Actions, se precisar
+  workflow_dispatch:
+    inputs:
+      ino:
+        description: 'Caminho do .ino a compilar (ex: esp32_A4-CF-12-F0-93-90/gateway_esp32_v13.ino)'
+        required: true
 
 permissions:
   contents: write
+
+# Dois uploads seguidos nao rodam ao mesmo tempo (evita um push atropelar o outro).
+concurrency:
+  group: compilar-firmware
+  cancel-in-progress: false
+
+env:
+  CORE_ESP8266: "esp8266:esp8266@3.1.2"
+  CORE_ESP32: "esp32:esp32@3.3.12"
+  FQBN_ESP8266: "esp8266:esp8266:d1_mini"
+  FQBN_ESP32: "esp32:esp32:esp32:PartitionScheme=default"
+  LIB_WIFIMANAGER: "WiFiManager@2.0.17"
 
 jobs:
   compilar:
@@ -73,90 +84,184 @@ jobs:
       - name: Baixar o repositorio
         uses: actions/checkout@v6
         with:
-          fetch-depth: 2   # precisa do commit anterior tambem, pra comparar o que mudou (passo seguinte)
-          token: ${{ secrets.FIRMWARE_PAT }}   # PAT proprio, nao o GITHUB_TOKEN automatico - ver explicacao no topo do arquivo
+          fetch-depth: 0   # historico completo, pra comparar com o commit anterior ao push
+          token: ${{ secrets.FIRMWARE_PAT }}   # PAT proprio, nao o GITHUB_TOKEN automatico
+
+      - name: Descobrir quais .ino compilar e pra qual placa
+        id: plano
+        env:
+          INO_MANUAL: ${{ github.event.inputs.ino }}
+          ANTES: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          PLANO="$RUNNER_TEMP/plano.txt"
+          : > "$PLANO"
+
+          # 1) Lista de .ino mudados
+          if [ -n "${INO_MANUAL:-}" ]; then
+            INOS="$INO_MANUAL"
+            [ -f "$INOS" ] || { echo "::error::Arquivo nao encontrado: $INOS"; exit 1; }
+          else
+            if [ -n "${ANTES:-}" ] && [ "$ANTES" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$ANTES^{commit}" 2>/dev/null; then
+              BASE="$ANTES"
+            else
+              BASE="HEAD~1"
+            fi
+            # --diff-filter=d: ignora .ino APAGADOS (apagar versao antiga nao dispara compilacao)
+            INOS=$(git diff --name-only --diff-filter=d "$BASE" HEAD -- '*.ino' || true)
+          fi
+
+          if [ -z "$INOS" ]; then
+            echo "Nenhum .ino novo/alterado neste push - nada a compilar."
+            echo "tem_trabalho=nao" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Arquivos .ino deste push:"
+          echo "$INOS" | sed 's/^/  - /'
+
+          REGEX_DISPOSITIVO='^(esp32|esp8266)_[0-9A-F]{2}(-[0-9A-F]{2}){5}$'
+          ERROS=0
+          PRECISA_ESP32=nao
+          PRECISA_ESP8266=nao
+
+          while IFS= read -r INO; do
+            [ -z "$INO" ] && continue
+            PRIMEIRA=$(echo "$INO" | cut -d/ -f1)
+
+            if echo "$PRIMEIRA" | grep -Eq "$REGEX_DISPOSITIVO"; then
+              DESTINO="$PRIMEIRA"
+              PLACA="${PRIMEIRA%%_*}"
+            elif echo "$PRIMEIRA" | grep -Eiq '^esp(32|8266)[_ -]'; then
+              echo "::error::Pasta com nome fora do padrao: '$PRIMEIRA'. Use por ex. esp32_A4-CF-12-F0-93-90 (prefixo minusculo, MAC MAIUSCULO, '-' no lugar de ':')."
+              ERROS=1
+              continue
+            elif [ "$INO" = "$PRIMEIRA" ]; then
+              echo "::error::'$INO' esta solto na raiz. Coloque dentro da pasta do Gateway."
+              ERROS=1
+              continue
+            else
+              DESTINO="."          # LEGADO: pasta comum -> firmware.bin da raiz
+              PLACA="esp8266"
+            fi
+
+            if [ "$PLACA" = "esp32" ]; then
+              FQBN="$FQBN_ESP32"; PRECISA_ESP32=sim
+            else
+              FQBN="$FQBN_ESP8266"; PRECISA_ESP8266=sim
+            fi
+
+            # Mais de um .ino pro mesmo destino no mesmo push = ambiguo, recusa.
+            if cut -d'|' -f3 "$PLANO" | grep -Fxq "$DESTINO"; then
+              echo "::error::Mais de um .ino mudou pra '$DESTINO' no mesmo push. Suba um de cada vez."
+              ERROS=1
+              continue
+            fi
+
+            echo "$FQBN|$INO|$DESTINO" >> "$PLANO"
+          done <<< "$INOS"
+
+          if [ "$ERROS" != "0" ]; then
+            echo "Corrija os erros acima - NADA foi compilado/publicado neste push."
+            exit 1
+          fi
+
+          echo ""
+          echo "Plano de compilacao (placa | .ino | pasta de saida):"
+          sed 's/^/  /' "$PLANO"
+          echo "tem_trabalho=sim" >> "$GITHUB_OUTPUT"
+          echo "precisa_esp32=$PRECISA_ESP32" >> "$GITHUB_OUTPUT"
+          echo "precisa_esp8266=$PRECISA_ESP8266" >> "$GITHUB_OUTPUT"
 
       - name: Instalar o arduino-cli
+        if: steps.plano.outputs.tem_trabalho == 'sim'
         uses: arduino/setup-arduino-cli@v2
 
-      - name: Configurar indice do core ESP8266
+      - name: Instalar cores e biblioteca (so as placas necessarias)
+        if: steps.plano.outputs.tem_trabalho == 'sim'
         run: |
-          arduino-cli config init --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          set -euo pipefail
+          arduino-cli config init --overwrite --additional-urls \
+            https://arduino.esp8266.com/stable/package_esp8266com_index.json,https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
-
-      - name: Instalar o core ESP8266 (mesma versao usada no projeto)
-        run: arduino-cli core install esp8266:esp8266@3.1.2
-
-      - name: Instalar a biblioteca WiFiManager
-        run: arduino-cli lib install "WiFiManager@2.0.17"
-
-      - name: Achar a pasta do sketch automaticamente
-        id: achar_sketch
-        run: |
-          # Prioridade 1: qual .ino mudou no commit que disparou este workflow.
-          # E o jeito mais confiavel de saber "qual e a versao nova" quando
-          # existem varias pastas de versoes antigas paradas no repositorio
-          # (ex: v6, v7, v8 juntas) - olha o commit, nao a lista de pastas.
-          # --diff-filter=d EXCLUI arquivos deletados do resultado: um commit
-          # que so apaga uma pasta antiga (sem adicionar/editar nenhum .ino)
-          # nao deve ser tratado como "achei o sketch novo" - ele cai no
-          # fallback abaixo, que acha a pasta valida mais recente que ainda
-          # existe. Sem esse filtro, um commit de delete faria a Action tentar
-          # compilar um caminho que nao existe mais e falhar.
-          ARQUIVO_MUDADO=$(git diff --name-only --diff-filter=d HEAD~1 HEAD -- '*.ino' | head -n 1 || true)
-
-          if [ -n "$ARQUIVO_MUDADO" ]; then
-            CAMINHO=$(dirname "$ARQUIVO_MUDADO")
-            echo "Sketch encontrado pelo commit (.ino que mudou): $CAMINHO"
-          else
-            # Fallback (ex: rodou manualmente pela aba Actions, sem commit
-            # novo de .ino pra comparar): pega a pasta valida modificada
-            # mais recentemente no checkout.
-            echo "Nenhum .ino novo neste commit - usando fallback (pasta mais recente)."
-            CAMINHO=$(find . -path ./.github -prune -o -name "*.ino" -printf '%T@ %p\n' -type f 2>/dev/null \
-              | sort -rn \
-              | while read -r ts arquivo; do
-                  pasta=$(dirname "$arquivo")
-                  nome_pasta=$(basename "$pasta")
-                  nome_arquivo=$(basename "$arquivo" .ino)
-                  if [ "$nome_pasta" = "$nome_arquivo" ]; then
-                    echo "$pasta"
-                  fi
-                done | head -n 1)
+          if [ "${{ steps.plano.outputs.precisa_esp8266 }}" = "sim" ]; then
+            arduino-cli core install "$CORE_ESP8266"
           fi
-
-          if [ -z "$CAMINHO" ]; then
-            echo "ERRO: nenhuma pasta encontrada no formato NomeDoSketch/NomeDoSketch.ino"
-            exit 1
+          if [ "${{ steps.plano.outputs.precisa_esp32 }}" = "sim" ]; then
+            arduino-cli core install "$CORE_ESP32"
           fi
+          arduino-cli lib install "$LIB_WIFIMANAGER"
 
-          echo "Pasta do sketch que sera compilada: $CAMINHO"
-          echo "caminho=$CAMINHO" >> "$GITHUB_OUTPUT"
-
-      - name: Compilar o sketch (gera o .bin dentro da propria pasta)
+      - name: Compilar e gerar firmware.bin + version.txt em cada pasta
+        if: steps.plano.outputs.tem_trabalho == 'sim'
         run: |
-          arduino-cli compile \
-            --fqbn esp8266:esp8266:d1_mini \
-            --export-binaries \
-            "${{ steps.achar_sketch.outputs.caminho }}"
+          set -euo pipefail
+          PLANO="$RUNNER_TEMP/plano.txt"
+          : > "$RUNNER_TEMP/gerados.txt"
 
-      - name: Copiar o .bin gerado para firmware.bin na raiz
+          while IFS='|' read -r FQBN INO DESTINO; do
+            echo ""
+            echo "=================================================================="
+            echo "Compilando: $INO"
+            echo "Placa     : $FQBN"
+            echo "Saida     : $DESTINO/firmware.bin"
+            echo "=================================================================="
+
+            PASTA_INO=$(dirname "$INO")
+            NOME=$(basename "$INO" .ino)
+
+            if [ "$(basename "$PASTA_INO")" = "$NOME" ] && [ "$PASTA_INO" != "$DESTINO" ]; then
+              # Ja e uma pasta de sketch no formato do Arduino (Nome/Nome.ino):
+              # compila ela mesma (inclui .h/.cpp que estiverem junto).
+              SKETCH="$PASTA_INO"
+            else
+              # .ino solto dentro da pasta do Gateway: copia pra uma pasta
+              # temporaria com o mesmo nome (regra do Arduino) e compila SO ele -
+              # as outras versoes da pasta nao entram na compilacao.
+              # (nome limpo: o Arduino nao aceita espaco/acento no nome do sketch)
+              NOME=$(echo "$NOME" | sed 's/[^A-Za-z0-9_.-]/_/g; s/^[^A-Za-z0-9]/s/')
+              SKETCH="$RUNNER_TEMP/sketches/$NOME"
+              rm -rf "$SKETCH"; mkdir -p "$SKETCH"
+              cp "$INO" "$SKETCH/$NOME.ino"
+            fi
+
+            SAIDA="$RUNNER_TEMP/build/$NOME"
+            rm -rf "$SAIDA"
+            arduino-cli compile --fqbn "$FQBN" --output-dir "$SAIDA" "$SKETCH"
+
+            BIN="$SAIDA/$NOME.ino.bin"
+            [ -f "$BIN" ] || { echo "::error::compilacao nao gerou $BIN"; exit 1; }
+
+            mkdir -p "$DESTINO"
+            cp "$BIN" "$DESTINO/firmware.bin"
+            HASH=$(sha256sum "$DESTINO/firmware.bin" | cut -c1-12)
+            echo -n "$HASH" > "$DESTINO/version.txt"
+            echo "OK: $DESTINO/firmware.bin ($(stat -c %s "$DESTINO/firmware.bin") bytes) - version.txt = $HASH"
+
+            echo "$DESTINO/firmware.bin" >> "$RUNNER_TEMP/gerados.txt"
+            echo "$DESTINO/version.txt"  >> "$RUNNER_TEMP/gerados.txt"
+          done < "$PLANO"
+
+      - name: Commitar firmware.bin + version.txt (so se realmente mudou)
+        if: steps.plano.outputs.tem_trabalho == 'sim'
         run: |
-          CAMINHO="${{ steps.achar_sketch.outputs.caminho }}"
-          BIN_GERADO=$(find "$CAMINHO/build" -name "*.ino.bin" | head -n 1)
-
-          if [ -z "$BIN_GERADO" ]; then
-            echo "ERRO: compilacao nao gerou nenhum .bin"
-            exit 1
-          fi
-
-          echo "Binario gerado: $BIN_GERADO"
-          cp "$BIN_GERADO" firmware.bin
-
-      - name: Commitar firmware.bin (so se realmente mudou)
-        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add firmware.bin
-          git diff --cached --quiet && echo "Nada mudou, nada pra commitar." || git commit -m "Compila firmware.bin automaticamente a partir do .ino"
-          git push
+          xargs -a "$RUNNER_TEMP/gerados.txt" git add --
+          if git diff --cached --quiet; then
+            echo "Nada mudou, nada pra commitar."
+            exit 0
+          fi
+          PASTAS=$(xargs -a "$RUNNER_TEMP/gerados.txt" -n1 dirname | sort -u | paste -sd' ')
+          git commit -m "Compila firmware.bin automaticamente a partir do .ino ($PASTAS)"
+          # Se alguem subiu outra coisa enquanto compilava, reaplica por cima e tenta de novo.
+          for TENTATIVA in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push falhou (tentativa $TENTATIVA) - tentando de novo em 5s..."
+            sleep 5
+          done
+          echo "::error::Nao consegui fazer push depois de 3 tentativas."
+          exit 1
