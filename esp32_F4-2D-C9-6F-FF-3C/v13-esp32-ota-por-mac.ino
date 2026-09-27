@@ -124,7 +124,7 @@
 
 // So um rotulo pra humano ler no Serial - nao tem efeito na logica de OTA
 // (a comparacao de versao usa o hash do version.txt, nao isto aqui).
-#define FIRMWARE_VERSION       "v14"
+#define FIRMWARE_VERSION       "v15"
 
 #define OTA_GITHUB_USER        "vinilima-br"
 #define OTA_GITHUB_REPO        "garcom-firmware"
