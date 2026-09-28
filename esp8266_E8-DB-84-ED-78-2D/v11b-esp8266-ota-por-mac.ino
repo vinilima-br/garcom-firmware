@@ -638,7 +638,7 @@ void setup() {
   Serial.println(F("=============================================="));
   Serial.println(F("   ETAPA 3.1 FINAL v8  -  GATEWAY (neon + OTA, compilado via GitHub Action)"));
   Serial.println(F("=============================================="));
-  Serial.print(F("versao deste firmware : "));
+  Serial.print(F(">>>>  Versao deste firmware : <<<<<<<"));
   Serial.println(FIRMWARE_VERSION);
   Serial.print(F("motivo do ultimo boot : "));
   Serial.println(ESP.getResetReason());
